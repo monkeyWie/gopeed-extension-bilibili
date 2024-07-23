@@ -1,0 +1,86 @@
+{
+  "name": "bilibili",
+  "author": "monkeyWie",
+  "title": "哔哩哔哩",
+  "description": "哔哩哔哩视频下载扩展，需要配置登录cookie才能下载高质量视频，获取方法请参考主页的教程",
+  "icon": "icon.png",
+  "version": "1.0.0",
+  "homepage": "https://github.com/monkeyWie/gopeed-extension-bilibili",
+  "repository": {
+    "url": "https://github.com/monkeyWie/gopeed-extension-bilibili"
+  },
+  "scripts": [
+    {
+      "event": "onResolve",
+      "match": {
+        "urls": ["*://*.bilibili.com/video/*"]
+      },
+      "entry": "dist/index.js"
+    }
+  ],
+  "settings": [
+    {
+      "name": "quality",
+      "title": "画质",
+      "type": "number",
+      "value": 80,
+      "options": [
+        {
+          "label": "超清 4K",
+          "value": 120
+        },
+        {
+          "label": "高帧率 1080P60",
+          "value": 116
+        },
+        {
+          "label": "高码率 1080P+",
+          "value": 112
+        },
+        {
+          "label": "高清 1080P",
+          "value": 80
+        },
+        {
+          "label": "高帧率 720P60",
+          "value": 74
+        },
+        {
+          "label": "高清 720P",
+          "value": 64
+        },
+        {
+          "label": "清晰 480P",
+          "value": 32
+        },
+        {
+          "label": "流畅 360P",
+          "value": 16
+        }
+      ]
+    },
+    {
+      "name": "qualityFallback",
+      "title": "画质备选",
+      "description": "没有匹配到指定画质时生效",
+      "type": "string",
+      "value": "best",
+      "options": [
+        {
+          "label": "最高画质",
+          "value": "best"
+        },
+        {
+          "label": "最低画质",
+          "value": "lowest"
+        }
+      ]
+    },
+    {
+      "name": "cookie",
+      "title": "网站 Cookie",
+      "description": "Cookie 可以通过浏览器开发者工具获取",
+      "type": "string"
+    }
+  ]
+}
