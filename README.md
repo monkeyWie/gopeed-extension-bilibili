@@ -14,6 +14,17 @@
 
 ![](image/demo.gif)
 
+### 分P视频下载
+
+可以在链接上添加`p`参数来下载指定的分P视频，例如：
+
+- 下载指定分P：`https://www.bilibili.com/video/BV1BJ4m1e7g8?p=1`
+- 下载分P范围：`https://www.bilibili.com/video/BV1BJ4m1e7g8?p=1-3`
+- 下载分P范围(指定开始)：`https://www.bilibili.com/video/BV1BJ4m1e7g8?p=1-`
+- 下载分P范围(指定结束)：`https://www.bilibili.com/video/BV1BJ4m1e7g8?p=-3`
+
+如果不指定`p`参数，默认下载所有分P视频。
+
 ### 清晰度说明
 
 由于B站高清视频(>=720P)需要登录才能观看，所以默认下载最高的画质只能是`480P`，如果需要下载更高画质的视频，需要拿到浏览器上B站的`cookie`，然后在Gopeed扩展页面设置`cookie`，设置方法如下：
