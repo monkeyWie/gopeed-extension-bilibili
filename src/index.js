@@ -48,8 +48,9 @@ gopeed.events.onResolve(async (ctx) => {
 
     function buildFile(type) {
       /** @type { import('@gopeed/types').FileInfo } */
+      const t = {"video":"mp4","audio":"m4a"};
       return {
-        name: `${namePrefix}.${type}.mp4`,
+        name: `${namePrefix}.${type}.${t[type]}`,
         req: {
           url: ctx.req.url,
           extra: {
