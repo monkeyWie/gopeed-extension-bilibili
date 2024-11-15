@@ -2,19 +2,35 @@
 // import { Video } from 'bilibili-api-ts/video.js';
 import { Video } from '@renmu/bili-api';
 
+function getBvid(url) {
+  const match = url.match(/\/(BV\w{10})/);
+  return match ? match[1] : null;
+}
+
+function getAid(url) {
+  const match = url.match(/\/av(\d+)/);
+  return match ? match[1] : null;
+}
+
 // https://www.npmjs.com/package/bilibili-api-ts
 // https://nemo2011.github.io/bilibili-api/
 gopeed.events.onResolve(async (ctx) => {
   const url = new URL(ctx.req.url);
-  // 匹配B站bv号 https://www.bilibili.com/video/BV1ej41117VW
-  const match = url.pathname.match(/\/(BV\w{10})/);
-  if (!match) {
+  const videoId = {};
+  const bvid = getBvid(url.pathname);
+  if (bvid) {
+    videoId.bvid = bvid;
+  }
+  const aid = getAid(url.pathname);
+  if (aid) {
+    videoId.aid = aid;
+  }
+  if (!bvid && !aid) {
     return;
   }
-  const bvid = match[1];
 
   const video = new Video({ cookie: gopeed.settings.cookie }, true);
-  const info = await video.info({ bvid });
+  const info = await video.info(videoId);
 
   // 判断是否为分P视频
   const isMultiPart = info.pages.length > 1;
@@ -48,7 +64,7 @@ gopeed.events.onResolve(async (ctx) => {
 
     function buildFile(type) {
       /** @type { import('@gopeed/types').FileInfo } */
-      const t = {"video":"mp4","audio":"m4a"};
+      const t = { video: 'mp4', audio: 'm4a' };
       return {
         name: `${namePrefix}.${type}.${t[type]}`,
         req: {
