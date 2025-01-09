@@ -100,7 +100,6 @@ gopeed.events.onResolve(async (ctx) => {
 
 /** @param { import('gopeed').OnStartContext } ctx */
 gopeed.events.onStart(async (ctx) => {
-  gopeed.logger.info(`开始下载 ${ctx.task.meta.req.url}`);
   await updateDownloadUrl(ctx.task);
 });
 
@@ -117,8 +116,25 @@ async function updateDownloadUrl(task) {
   // 如果没有获取过下载链接或者任务状态为错误，则重新获取下载链接
   if (!req.labels.gotDlink || task.status === 'error') {
     const lables = task.meta.req.labels;
-    const video = new Video({ cookie: gopeed.settings.cookie }, true);
-    const videoUrl = await video.playurl({ bvid: lables.bvid, cid: lables.cid, fnval: 16 | 2048, fourk: 1 });
+    const video = new Video({ cookie: gopeed.settings.cookie?.trim() || undefined }, true);
+    // 使用dash格式av1编码，
+    let fnval = 16 | 2048;
+    // 开启4k
+    fnval |= 128;
+    // 开启8k
+    fnval |= 1024;
+    // 开启HDR
+    if (gopeed.settings.hdr) {
+      fnval |= 64;
+    }
+    // 开启杜比视界
+    if (gopeed.settings.dbs) {
+      fnval |= 256;
+      fnval |= 512;
+    }
+
+    const videoUrl = await video.playurl({ bvid: lables.bvid, cid: lables.cid, fnval, fourk: 1 });
+    gopeed.logger.debug('video list', JSON.stringify(videoUrl.dash.video));
     const fallbackBest = gopeed.settings.qualityFallback === 'best';
     // 优先匹配指定清晰度，如果没有则按照清晰度排序规则选择第一个
     let downloadUrl;
