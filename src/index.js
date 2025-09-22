@@ -1,6 +1,7 @@
 // import * as bilibili from 'bilibili-api-ts';
 // import { Video } from 'bilibili-api-ts/video.js';
 import { Video } from '@renmu/bili-api';
+import { enc } from './av2bv.js';
 
 function getBvid(url) {
   const match = url.match(/\/(BV\w{10})/);
@@ -23,9 +24,10 @@ gopeed.events.onResolve(async (ctx) => {
   }
   const aid = getAid(url.pathname);
   if (aid) {
-    videoId.aid = aid;
+    // eslint-disable-next-line no-undef
+    videoId.bvid = enc(BigInt(aid));
   }
-  if (!bvid && !aid) {
+  if (!videoId.bvid) {
     return;
   }
 
@@ -76,7 +78,7 @@ gopeed.events.onResolve(async (ctx) => {
           },
           labels: {
             [gopeed.info.identity]: '1',
-            bvid,
+            bvid: videoId.bvid,
             cid: info.pages[p].cid,
             p,
             type,
