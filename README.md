@@ -1,57 +1,58 @@
 # Gopeed B站视频下载扩展
 
-## 声明
+使用 [Gopeed](https://gopeed.com) 下载哔哩哔哩视频和分 P 视频。
 
-本项目代码全部开源，仅供学习交流使用，不得用于商业用途，如有侵权请联系作者删除
+> 需要 Gopeed 版本 >= 2.0.0。
+
+## 功能特性
+
+- **视频下载** — 粘贴 B 站视频链接即可下载。
+- **分 P 批量下载** — 支持下载全部分 P、指定分 P 或分 P 范围。
+- **最高 8K 画质** — 支持选择最高 8K 画质，实际可用画质取决于视频源和账号权限。
+- **自动合并音视频** — 通过 FFmpeg 自动将分离的音视频合并为一个 MP4，无需手动操作。
+- **画质选择** — 支持设置画质和备选画质，以及开启 HDR、杜比视界，需视频源及账号权限支持。
 
 ## 安装
 
-打开Gopeed扩展页面，输入`https://github.com/monkeyWie/gopeed-extension-bilibili`，点击安装即可。
+打开 Gopeed 的扩展页面，输入 `https://github.com/monkeyWie/gopeed-extension-bilibili`，点击安装。
 
 ## 使用说明
 
-安装完扩展后，在任务创建页面输入B站视频链接，点击创建任务即可解析下载，效果图：
+打开 Gopeed 的**创建任务**面板，粘贴 B 站视频链接，点击下载即可。以下是三种链接示例，请将 `BV_ID` 替换为实际视频的 BV 号：
+
+| 类型 | 示例链接 |
+| --- | --- |
+| 视频或全部分 P | `https://www.bilibili.com/video/BV_ID` |
+| 指定分 P | `https://www.bilibili.com/video/BV_ID?p=2` |
+| 分 P 范围 | `https://www.bilibili.com/video/BV_ID?p=1-3` |
 
 ![](image/demo.gif)
 
-### 分P视频下载
+### 分 P 视频
 
-可以在链接上添加`p`参数来下载指定的分P视频，例如：
+不指定 `p` 参数时会解析全部分 P，可在创建任务面板选择需要下载的视频。也可以使用 `p=2-` 下载第 2 P 及之后的视频，或使用 `p=-3` 下载前 3 P。
 
-- 下载指定分P：`https://www.bilibili.com/video/BV1BJ4m1e7g8?p=1`
-- 下载分P范围：`https://www.bilibili.com/video/BV1BJ4m1e7g8?p=1-3`
-- 下载分P范围(指定开始)：`https://www.bilibili.com/video/BV1BJ4m1e7g8?p=1-`
-- 下载分P范围(指定结束)：`https://www.bilibili.com/video/BV1BJ4m1e7g8?p=-3`
+### 画质与 Cookie
 
-如果不指定`p`参数，默认下载所有分P视频。
+在扩展设置中选择需要的画质；指定画质不可用时，会使用设置的备选画质。需要登录或大会员权限的画质，请配置具有相应权限的 B 站账号 Cookie。
 
-### 清晰度说明
-
-由于B站高清视频(>=720P)需要登录才能观看，所以默认下载最高的画质只能是`480P`，如果需要下载更高画质的视频，需要拿到浏览器上B站的`cookie`，然后在Gopeed扩展页面设置`cookie`，设置方法如下：
-
-1. 打开B站视频页面，按`F12`打开开发者工具，切换到`网络`选项卡
+1. 打开 B 站视频页面，按 `F12` 打开开发者工具，切换到**网络**选项卡。
 
 ![](image/cookie-1.png)
 
-2. 刷新页面，找到`api.bilibili.com`的请求，复制请求头里的`cookie`值
+2. 刷新页面，找到 `api.bilibili.com` 的请求，复制请求头中的 `cookie` 值。
 
 ![](image/cookie-2.png)
 
-3. 打开扩展设置页面，设置`cookie`值，点击保存
+3. 打开 Gopeed 的扩展设置，填写**网站 Cookie**，保存后重新创建任务。
 
 ![](image/cookie-3.png)
 
-然后重新解析即可下载更高画质的视频。
+## 声明
 
-### 音视频分离
-
-由于B站视频是音视频分离的，在下载的时候会下载两个文件，一个是视频文件，一个是音频文件，下载完成后需要自行合并，目前Gopeed不支持音视频合并，可以使用`ffmpeg`命令行工具合并，命令如下：
-
-```shell
-ffmpeg -i video.mp4 -i audio.mp4 -c copy -f mp4 output.mp4
-```
+本项目代码全部开源，仅供学习交流使用，不得用于商业用途，如有侵权请联系作者删除。
 
 ## 相关链接
 
-- [bili-api](https://github.com/renmu123/biliAPI) bilibili 接口的 node 包装库
-- [gopeed-docs](https://docs.gopeed.com/zh/dev-extension.html) Gopeed扩展开发文档
+- [bili-api](https://github.com/renmu123/biliAPI)
+- [Gopeed 扩展开发文档](https://docs.gopeed.com/zh/dev-extension.html)
