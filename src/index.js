@@ -18,10 +18,43 @@ function getAid(url) {
   return match ? match[1] : null;
 }
 
+// Resolve only the short-link redirects; the video page HTML is not needed.
+async function resolveVideoURL(rawURL) {
+  let url = new URL(rawURL);
+  if (url.hostname !== 'b23.tv') return url;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    for (let redirects = 0; redirects < 5; redirects++) {
+      const response = await fetch(url.toString(), { redirect: 'manual', signal: controller.signal });
+      const location = response.headers.get('location');
+      await response.body?.cancel();
+      if (![301, 302, 303, 307, 308].includes(response.status) || !location) {
+        throw new MessageError('B站短链未返回有效跳转，请检查链接是否有效。');
+      }
+      url = new URL(location, url);
+      if (!['http:', 'https:'].includes(url.protocol)) break;
+      if (url.hostname === 'b23.tv') continue;
+      if (
+        (url.hostname === 'bilibili.com' || url.hostname.endsWith('.bilibili.com')) &&
+        url.pathname.startsWith('/video/') && (getBvid(url.pathname) || getAid(url.pathname))
+      ) return url;
+      throw new MessageError('该B站短链不是普通视频链接，目前仅支持视频和分P视频。');
+    }
+    throw new MessageError('B站短链跳转次数过多或跳转地址无效，请使用完整视频链接。');
+  } catch (error) {
+    if (error instanceof MessageError) throw error;
+    throw new MessageError('B站短链解析失败，请检查网络或使用完整视频链接重试。');
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // https://www.npmjs.com/package/bilibili-api-ts
 // https://nemo2011.github.io/bilibili-api/
 gopeed.events.onResolve(async (ctx) => {
-  const url = new URL(ctx.req.url);
+  requireHostVersion();
+  const url = await resolveVideoURL(ctx.req.url);
   const videoId = {};
   const bvid = getBvid(url.pathname);
   if (bvid) {
@@ -124,6 +157,13 @@ gopeed.events.onError(async (ctx) => {
   }
   await ctx.task.continue();
 });
+
+function requireHostVersion() {
+  // gopeed.host 仅在 Gopeed v2.0.0-beta 及以上版本提供。
+  if (!gopeed.host?.env?.version) {
+    throw new MessageError('该扩展需要 Gopeed v2.0.0-beta 及以上版本，请升级 Gopeed 后再使用。');
+  }
+}
 
 function requireMergeRuntime() {
   if (

@@ -4,7 +4,7 @@
   "title": "哔哩哔哩",
   "description": "哔哩哔哩视频下载扩展，支持批量下载分P视频和自动合并音视频",
   "icon": "icon.png",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "homepage": "https://github.com/monkeyWie/gopeed-extension-bilibili",
   "repository": {
     "url": "https://github.com/monkeyWie/gopeed-extension-bilibili"
@@ -14,7 +14,8 @@
       "event": "onResolve",
       "match": {
         "urls": [
-          "*://*.bilibili.com/video/*"
+          "*://*.bilibili.com/video/*",
+          "*://b23.tv/*"
         ]
       },
       "entry": "dist/index.js"

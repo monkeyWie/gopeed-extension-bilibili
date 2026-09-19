@@ -46,6 +46,7 @@ function setup(options = {}) {
   const gopeed = {
     info: { identity: 'monkeyWie@bilibili' },
     settings: { quality: 80, qualityFallback: 'best', cookie: ' session=secret ', ...options.settings },
+    host: { env: { version: '2.0.0-beta.3', os: 'darwin', arch: 'arm64' } },
     events: Object.fromEntries(
       ['onResolve', 'onStart', 'onError'].map((key) => [
         key,
@@ -76,7 +77,8 @@ function setup(options = {}) {
     },
   };
   if (options.noRuntime) delete gopeed.runtime;
-  vm.runInNewContext(script, { Video, enc, gopeed, URL, MessageError });
+  if (options.legacyHost) delete gopeed.host;
+  vm.runInNewContext(script, { Video, enc, gopeed, URL, MessageError, AbortController, setTimeout, clearTimeout, fetch: options.fetch });
   const resolve = async (suffix = '') => {
     const ctx = { req: { url: `https://www.bilibili.com/video/${bvid}${suffix}` } };
     await handlers.onResolve(ctx);
@@ -179,6 +181,13 @@ test('missing tracks and API errors propagate; older runtimes fail clearly', asy
   await assert.rejects(
     setup({ noRuntime: true }).resolve(),
     (error) => error instanceof MessageError && /FFmpeg WASM/.test(error.message)
+  );
+});
+
+test('legacy Gopeed without gopeed.host is asked to upgrade on resolve', async () => {
+  await assert.rejects(
+    setup({ legacyHost: true }).resolve(),
+    (error) => error instanceof MessageError && /Gopeed v2\.0\.0-beta/.test(error.message)
   );
 });
 
@@ -356,4 +365,47 @@ test('missing media URLs use MessageError; one attempt keeps its selected signed
   await h.blobs.get(task.meta.req.url).open();
   assert.equal(h.merges[2].video.url, 'https://changed.example/video');
   assert.equal(JSON.parse(task.meta.req.labels.mergeCdnState).current.video, 'https://changed.example');
+});
+
+
+test('short link resolves a video without fetching its HTML and preserves the selected part', async () => {
+  let cancelled = false;
+  const h = setup({ parts: 3, fetch: async (url, options) => {
+    assert.equal(url, 'https://b23.tv/5s1tsW1');
+    assert.equal(options.redirect, 'manual');
+    return { status: 302, headers: new Headers({ location: `https://www.bilibili.com/video/${bvid}?p=2` }),
+      body: { async cancel() { cancelled = true; } } };
+  } });
+  const ctx = { req: { url: 'https://b23.tv/5s1tsW1' } };
+  await h.handlers.onResolve(ctx);
+  assert.equal(cancelled, true);
+  assert.equal(ctx.res.files.length, 1);
+  assert.equal(ctx.res.files[0].name, '测试(P2).mp4');
+  assert.equal(ctx.res.files[0].req.rawUrl, ctx.req.url);
+  assert.equal(ctx.res.files[0].req.labels.bvid, bvid);
+});
+
+test('short links support relative redirects and AV video targets', async () => {
+  const urls = [];
+  const h = setup({ fetch: async url => {
+    urls.push(url);
+    return { status: 302, headers: new Headers({ location: urls.length === 1 ? '/next' : 'https://www.bilibili.com/video/av170001' }) };
+  } });
+  const ctx = { req: { url: 'https://b23.tv/first' } };
+  await h.handlers.onResolve(ctx);
+  assert.deepEqual(urls, ['https://b23.tv/first', 'https://b23.tv/next']);
+  assert.equal(ctx.res.files[0].req.labels.bvid, enc(170001n));
+});
+
+test('invalid short links report MessageError instead of falling back to downloading HTML', async () => {
+  for (const location of [null, 'https://www.bilibili.com/read/cv123', 'https://example.com/video/' + bvid, '/loop']) {
+    let requests = 0;
+    const h = setup({ fetch: async () => {
+      requests++;
+      return { status: location ? 302 : 200, headers: new Headers(location ? { location } : {}) };
+    } });
+    await assert.rejects(h.handlers.onResolve({ req: { url: 'https://b23.tv/test' } }), MessageError);
+    assert.ok(requests <= 5);
+    assert.equal(h.calls.length, 0);
+  }
 });
