@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { test } from 'node:test';
 import { enc } from '../src/av2bv.js';
+import { Video as SDKVideo } from '@renmu/bili-api';
 
 const script = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8').replace(/^import .*;\n/gm, '');
 const bvid = 'BV1BJ4m1e7g8';
@@ -32,15 +33,46 @@ function setup(options = {}) {
       this.request = { defaults: { headers: { 'User-Agent': 'SDK-UA' } } };
     }
     async info(id) {
-      assert.equal(this.request.defaults.headers['User-Agent'], undefined);
       calls.push({ kind: 'info', id });
-      return { title: '测试', pages: Array.from({ length: options.parts || 1 }, (_, i) => ({ cid: i + 100 })) };
+      return {
+        title: options.title ?? '测试',
+        pages: Array.from({ length: options.parts || 1 }, (_, i) => ({ cid: i + 100 })),
+      };
     }
     async playurl(args) {
-      assert.equal(this.request.defaults.headers['User-Agent'], undefined);
       calls.push({ kind: 'playurl', args, cookie: this.config.cookie });
       if (options.playError) throw new Error('API unavailable');
-      return { dash };
+      return options.playurlResult ?? { dash: options.dashByCid?.[args.cid] || dash };
+    }
+  }
+  class RealVideo extends SDKVideo {
+    constructor(config, useCookie) {
+      super(config, useCookie);
+      this.wbiKeys = {
+        img_key: '7cd084941338484aae1ad9425b84077c',
+        sub_key: '4932caff0ff746eab6f01bf08b70ac45',
+      };
+      // Exercise the real SDK's signing and request interceptors without network access.
+      this.request.defaults.adapter = async (request) => {
+        const url = new URL(request.url);
+        const isInfo = url.pathname.endsWith('/view');
+        calls.push({
+          kind: isInfo ? 'info' : 'playurl',
+          url,
+          cookie: request.headers.get('cookie'),
+          userAgent: request.headers.get('User-Agent'),
+        });
+        return {
+          config: request,
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          data: {
+            code: 0,
+            data: isInfo ? { title: '测试', pages: [{ cid: 100 }] } : options.playurlResult ?? { dash },
+          },
+        };
+      };
     }
   }
   const gopeed = {
@@ -78,7 +110,18 @@ function setup(options = {}) {
   };
   if (options.noRuntime) delete gopeed.runtime;
   if (options.legacyHost) delete gopeed.host;
-  vm.runInNewContext(script, { Video, enc, gopeed, URL, MessageError, AbortController, setTimeout, clearTimeout, fetch: options.fetch });
+  vm.runInNewContext(script, {
+    Video: options.realSDK ? RealVideo : Video,
+    enc,
+    gopeed,
+    URL,
+    TextEncoder,
+    MessageError,
+    AbortController,
+    setTimeout,
+    clearTimeout,
+    fetch: options.fetch,
+  });
   const resolve = async (suffix = '') => {
     const ctx = { req: { url: `https://www.bilibili.com/video/${bvid}${suffix}` } };
     await handlers.onResolve(ctx);
@@ -89,11 +132,11 @@ function setup(options = {}) {
     req.putLabel = async (key, value) => {
       req.labels[key] = value;
     };
+    req.setUrl = async (url) => {
+      req.url = url;
+    };
     return {
       meta: { req },
-      async setUrl(url) {
-        req.url = url;
-      },
       continued: 0,
       async continue() {
         this.continued++;
@@ -110,9 +153,9 @@ test('one lazy merged MP4 per part; unknown size and no output ranges', async ()
   assert.equal(res.name, '测试');
   assert.deepEqual(
     Array.from(res.files, (f) => f.name),
-    ['测试(P2).mp4', '测试(P3).mp4']
+    [`${bvid}.测试(P2).1080p.mp4`, `${bvid}.测试(P3).1080p.mp4`]
   );
-  assert.equal(h.calls.filter((c) => c.kind === 'playurl').length, 0);
+  assert.equal(h.calls.filter((c) => c.kind === 'playurl').length, 2);
   assert.equal(h.merges.length, 0);
   for (const file of res.files) {
     assert.equal(file.size, undefined);
@@ -126,7 +169,7 @@ test('one lazy merged MP4 per part; unknown size and no output ranges', async ()
   }
   assert.deepEqual(
     h.calls.filter((c) => c.kind === 'playurl').map((c) => c.args.cid),
-    [101, 102]
+    [101, 102, 101, 102]
   );
 });
 
@@ -145,8 +188,9 @@ test('each Blob open refreshes URLs and creates a fresh merge with authenticated
     assert.equal(merge.format, undefined); // Runtime defaults to streaming MP4 and copy.
   }
   const calls = h.calls.filter((c) => c.kind === 'playurl');
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
   assert.equal(calls[0].args.fnval, 16 | 2048 | 128 | 1024 | 64 | 256 | 512);
+  assert.equal(calls[0].args.qn, 127);
   assert.equal(calls[0].cookie, 'session=secret');
 });
 
@@ -154,6 +198,7 @@ test('quality fallbacks and snake_case media URLs', async () => {
   for (const fallback of ['best', 'lowest']) {
     const h = setup({ settings: { quality: 120, qualityFallback: fallback, cookie: '' } });
     const res = await h.resolve();
+    assert.equal(res.files[0].name, `${bvid}.测试.${fallback === 'best' ? '1080p' : '720p'}.mp4`);
     await h.blobs.get(res.files[0].req.url).open();
     assert.equal(h.merges[0].video.url, fallback === 'best' ? 'https://cdn/video80' : 'https://cdn/video64');
     assert.equal(h.merges[0].audio.url, fallback === 'best' ? 'https://cdn/audio80' : 'https://cdn/audio16');
@@ -167,11 +212,107 @@ test('quality fallbacks and snake_case media URLs', async () => {
   assert.equal(h.merges[0].video.url, 'https://cdn/v');
 });
 
+test('resolution filenames use the selected dimensions for every part, including portrait video', async () => {
+  const audio = [{ id: 30280, baseUrl: 'https://cdn/audio' }];
+  const h = setup({
+    parts: 5,
+    settings: { quality: 120 },
+    dashByCid: {
+      100: { video: [{ id: 120, width: 3840, height: 2160, baseUrl: 'https://cdn/4k' }], audio },
+      101: { video: [{ id: 80, width: 1080, height: 1920, baseUrl: 'https://cdn/portrait' }], audio },
+      102: { video: [{ id: 120, width: 2560, height: 1440, baseUrl: 'https://cdn/2k' }], audio },
+      103: { video: [{ id: 127, width: 7680, height: 4320, baseUrl: 'https://cdn/8k' }], audio },
+      104: { video: [{ id: 127, baseUrl: 'https://cdn/8k-no-dimensions' }], audio },
+    },
+  });
+  const res = await h.resolve();
+  assert.deepEqual(
+    Array.from(res.files, (file) => file.name),
+    ['测试(P1).4k.mp4', '测试(P2).1080p.mp4', '测试(P3).2k.mp4', '测试(P4).8k.mp4', '测试(P5).8k.mp4'].map(
+      (name) => `${bvid}.${name}`
+    )
+  );
+  assert.deepEqual(
+    Array.from(res.files, (file) => file.req.labels.selectedQuality),
+    [120, 80, 120, 127, 127]
+  );
+});
+
+test('long UTF-8 titles fit Gopeed limits while preserving the video ID, part and resolution', async () => {
+  const h = setup({ title: '中文标题😀'.repeat(40), parts: 2 });
+  const res = await h.resolve();
+  for (const [index, file] of res.files.entries()) {
+    assert.ok(Buffer.byteLength(file.name, 'utf8') <= 100);
+    assert.equal(Buffer.from(file.name, 'utf8').toString('utf8'), file.name);
+    assert.ok(file.name.startsWith(`${bvid}.中文标题😀`));
+    assert.ok(file.name.endsWith(`(P${index + 1}).1080p.mp4`));
+  }
+});
+
+test('title budget adjusts to the resolution suffix and filename characters are sanitized', async () => {
+  const audio = [{ id: 30280, baseUrl: 'https://cdn/audio' }];
+  const title = 'a'.repeat(150);
+  const h = setup({
+    title,
+    parts: 2,
+    dashByCid: {
+      100: { video: [{ id: 80, width: 1920, height: 1080, baseUrl: 'https://cdn/1080' }], audio },
+      101: { video: [{ id: 120, width: 3840, height: 2160, baseUrl: 'https://cdn/4k' }], audio },
+    },
+  });
+  const res = await h.resolve();
+  assert.ok(res.files[0].name.endsWith('(P1).1080p.mp4'));
+  assert.ok(res.files[1].name.endsWith('(P2).4k.mp4'));
+  assert.equal(res.files[1].name.match(/a/g).length - res.files[0].name.match(/a/g).length, 3);
+  for (const file of res.files) assert.equal(Buffer.byteLength(file.name), 100);
+  const sanitized = await setup({ title: '标题/测试:文件*名?' }).resolve();
+  assert.equal(sanitized.files[0].name, `${bvid}.标题_测试_文件_名_.1080p.mp4`);
+});
+
+test('refresh preserves the named quality and rejects a silent downgrade after Cookie/permissions change', async () => {
+  const dash = {
+    video: [
+      { id: 64, baseUrl: 'https://cdn/video720' },
+      { id: 80, baseUrl: 'https://cdn/video1080' },
+    ],
+    audio: [{ id: 30280, baseUrl: 'https://cdn/audio' }],
+  };
+  const h = setup({ dash });
+  const file = (await h.resolve()).files[0];
+  assert.equal(file.name, `${bvid}.测试.1080p.mp4`);
+  h.gopeed.settings.quality = 64;
+  const task = h.task(file);
+  await h.handlers.onStart({ task });
+  await h.blobs.get(task.meta.req.url).open();
+  assert.equal(h.merges[0].video.url, 'https://cdn/video1080');
+  dash.video = dash.video.filter((track) => track.id !== 80);
+  await assert.rejects(h.handlers.onStart({ task }), /画质已不可用/);
+  assert.equal(h.merges.length, 1);
+});
+
+test('real 2.15.2 SDK sends the trimmed Cookie and signs the full-quality DASH request', async () => {
+  for (const cookie of [' SESSDATA=test-session; bili_jct=test-csrf ', '']) {
+    const h = setup({ realSDK: true, settings: { cookie } });
+    const file = (await h.resolve()).files[0];
+    await h.blobs.get(file.req.url).open();
+    assert.equal(file.name, `${bvid}.测试.1080p.mp4`);
+    const requests = h.calls.filter((call) => call.kind === 'playurl');
+    assert.equal(requests.length, 2);
+    for (const request of requests) {
+      assert.equal(request.cookie, cookie.trim() || undefined);
+      assert.match(request.userAgent, /Mozilla\/5\.0.*Chrome\//);
+      assert.equal(request.url.searchParams.get('qn'), '127');
+      assert.equal(request.url.searchParams.get('cid'), '100');
+      assert.equal(request.url.searchParams.get('fourk'), '1');
+      assert.match(request.url.searchParams.get('w_rid'), /^[0-9a-f]{32}$/);
+    }
+  }
+});
+
 test('missing tracks and API errors propagate; older runtimes fail clearly', async () => {
   for (const options of [{ dash: { video: [] } }, { playError: true }]) {
     const h = setup(options);
-    const res = await h.resolve();
-    await assert.rejects(h.blobs.get(res.files[0].req.url).open, (error) =>
+    await assert.rejects(h.resolve(), (error) =>
       options.playError
         ? !(error instanceof MessageError) && /API unavailable/.test(error.message)
         : error instanceof MessageError && /DASH/.test(error.message)
@@ -182,6 +323,14 @@ test('missing tracks and API errors propagate; older runtimes fail clearly', asy
     setup({ noRuntime: true }).resolve(),
     (error) => error instanceof MessageError && /FFmpeg WASM/.test(error.message)
   );
+});
+
+test('risk-control responses from the real SDK ask for verification instead of reporting missing DASH', async () => {
+  const h = setup({ realSDK: true, playurlResult: { v_voucher: 'verification-token' } });
+  await assert.rejects(h.resolve(), (error) => error instanceof MessageError && /风控验证/.test(error.message));
+  assert.equal(h.calls.filter((call) => call.kind === 'playurl').length, 1);
+  assert.equal(h.blobs.size, 0);
+  assert.equal(h.merges.length, 0);
 });
 
 test('legacy Gopeed without gopeed.host is asked to upgrade on resolve', async () => {
@@ -341,9 +490,8 @@ test('tracks can use a backup when no primary URL is available', async () => {
 
 test('missing media URLs use MessageError; one attempt keeps its selected signed URLs', async () => {
   const missing = setup({ dash: { video: [{ id: 80 }], audio: [{ id: 1, baseUrl: 'https://audio.example/audio' }] } });
-  const res = await missing.resolve();
   await assert.rejects(
-    missing.blobs.get(res.files[0].req.url).open,
+    missing.resolve(),
     (error) => error instanceof MessageError && /没有可用的 HTTP/.test(error.message)
   );
   const dash = {
@@ -367,43 +515,60 @@ test('missing media URLs use MessageError; one attempt keeps its selected signed
   assert.equal(JSON.parse(task.meta.req.labels.mergeCdnState).current.video, 'https://changed.example');
 });
 
-
 test('short link resolves a video without fetching its HTML and preserves the selected part', async () => {
   let cancelled = false;
-  const h = setup({ parts: 3, fetch: async (url, options) => {
-    assert.equal(url, 'https://b23.tv/5s1tsW1');
-    assert.equal(options.redirect, 'manual');
-    return { status: 302, headers: new Headers({ location: `https://www.bilibili.com/video/${bvid}?p=2` }),
-      body: { async cancel() { cancelled = true; } } };
-  } });
+  const h = setup({
+    parts: 3,
+    fetch: async (url, options) => {
+      assert.equal(url, 'https://b23.tv/5s1tsW1');
+      assert.equal(options.redirect, 'manual');
+      return {
+        status: 302,
+        headers: new Headers({ location: `https://www.bilibili.com/video/${bvid}?p=2` }),
+        body: {
+          async cancel() {
+            cancelled = true;
+          },
+        },
+      };
+    },
+  });
   const ctx = { req: { url: 'https://b23.tv/5s1tsW1' } };
   await h.handlers.onResolve(ctx);
   assert.equal(cancelled, true);
   assert.equal(ctx.res.files.length, 1);
-  assert.equal(ctx.res.files[0].name, '测试(P2).mp4');
+  assert.equal(ctx.res.files[0].name, `${bvid}.测试(P2).1080p.mp4`);
   assert.equal(ctx.res.files[0].req.rawUrl, ctx.req.url);
   assert.equal(ctx.res.files[0].req.labels.bvid, bvid);
 });
 
 test('short links support relative redirects and AV video targets', async () => {
   const urls = [];
-  const h = setup({ fetch: async url => {
-    urls.push(url);
-    return { status: 302, headers: new Headers({ location: urls.length === 1 ? '/next' : 'https://www.bilibili.com/video/av170001' }) };
-  } });
+  const h = setup({
+    fetch: async (url) => {
+      urls.push(url);
+      return {
+        status: 302,
+        headers: new Headers({ location: urls.length === 1 ? '/next' : 'https://www.bilibili.com/video/av170001' }),
+      };
+    },
+  });
   const ctx = { req: { url: 'https://b23.tv/first' } };
   await h.handlers.onResolve(ctx);
   assert.deepEqual(urls, ['https://b23.tv/first', 'https://b23.tv/next']);
   assert.equal(ctx.res.files[0].req.labels.bvid, enc(170001n));
+  assert.equal(ctx.res.files[0].name, 'av170001.测试.1080p.mp4');
 });
 
 test('invalid short links report MessageError instead of falling back to downloading HTML', async () => {
   for (const location of [null, 'https://www.bilibili.com/read/cv123', 'https://example.com/video/' + bvid, '/loop']) {
     let requests = 0;
-    const h = setup({ fetch: async () => {
-      requests++;
-      return { status: location ? 302 : 200, headers: new Headers(location ? { location } : {}) };
-    } });
+    const h = setup({
+      fetch: async () => {
+        requests++;
+        return { status: location ? 302 : 200, headers: new Headers(location ? { location } : {}) };
+      },
+    });
     await assert.rejects(h.handlers.onResolve({ req: { url: 'https://b23.tv/test' } }), MessageError);
     assert.ok(requests <= 5);
     assert.equal(h.calls.length, 0);

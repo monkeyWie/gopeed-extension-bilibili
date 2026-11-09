@@ -1,11 +1,10 @@
+/* eslint-env es6 */
 import { Video } from '@renmu/bili-api';
 import { enc } from './av2bv.js';
 
 function createVideo() {
-  const api = new Video({ cookie: gopeed.settings.cookie?.trim() || undefined }, true);
-  // Remove the SDK's browser UA so Gopeed supplies the configured HTTP default.
-  delete api.request.defaults.headers['User-Agent'];
-  return api;
+  // Keep the SDK's browser UA: anonymous playurl requests without it can require verification.
+  return new Video({ cookie: gopeed.settings.cookie?.trim() || undefined }, true);
 }
 
 function getBvid(url) {
@@ -37,8 +36,10 @@ async function resolveVideoURL(rawURL) {
       if (url.hostname === 'b23.tv') continue;
       if (
         (url.hostname === 'bilibili.com' || url.hostname.endsWith('.bilibili.com')) &&
-        url.pathname.startsWith('/video/') && (getBvid(url.pathname) || getAid(url.pathname))
-      ) return url;
+        url.pathname.startsWith('/video/') &&
+        (getBvid(url.pathname) || getAid(url.pathname))
+      )
+        return url;
       throw new MessageError('该B站短链不是普通视频链接，目前仅支持视频和分P视频。');
     }
     throw new MessageError('B站短链跳转次数过多或跳转地址无效，请使用完整视频链接。');
@@ -68,6 +69,7 @@ gopeed.events.onResolve(async (ctx) => {
   if (!videoId.bvid) {
     return;
   }
+  const filenameId = aid ? `av${aid}` : videoId.bvid;
 
   requireMergeRuntime();
   const video = createVideo();
@@ -111,9 +113,13 @@ gopeed.events.onResolve(async (ctx) => {
         type: 'merged',
         quality: gopeed.settings.quality,
       };
+      // Resolve the actual track before naming; a requested quality may fall back.
+      const tracks = await mediaTracks(labels);
+      labels.selectedQuality = tracks.quality;
+      labels.resolution = tracks.resolution;
       const blobUrl = await createMergedURL(labels);
       files.push({
-        name: `${info.title}${isMultiPart ? `(P${p + 1})` : ''}.mp4`,
+        name: videoFilename(filenameId, info.title, tracks.resolution, isMultiPart ? p + 1 : undefined),
         req: { url: blobUrl, rawUrl: ctx.req.url, labels },
       });
     }
@@ -189,6 +195,57 @@ function selectTrack(tracks, quality) {
   );
 }
 
+function videoFilename(id, title, resolution, part) {
+  const prefix = `${id}.`;
+  const suffix = `${part === undefined ? '' : `(P${part})`}.${resolution}.mp4`;
+  const encoder = new TextEncoder();
+  // Gopeed truncates filenames to 100 UTF-8 bytes, preserving only the final extension.
+  // Reserve the ID, part and resolution first so it never clips those fields.
+  let remaining = 100 - encoder.encode(prefix + suffix).length;
+  let clippedTitle = '';
+  // eslint-disable-next-line no-control-regex -- Control characters are invalid in filenames.
+  const safeTitle = title.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_');
+  for (const character of safeTitle) {
+    const size = encoder.encode(character).length;
+    if (size > remaining) break;
+    clippedTitle += character;
+    remaining -= size;
+  }
+  return prefix + clippedTitle + suffix;
+}
+
+function trackResolution(track) {
+  const width = Number(track.width);
+  const height = Number(track.height);
+  // Use the short edge for portrait videos as well as landscape videos.
+  const pixels = width > 0 && height > 0 ? Math.min(width, height) : height;
+  const names = { 1440: '2k', 2160: '4k', 4320: '8k' };
+  if (Number.isInteger(pixels) && pixels > 0) return names[pixels] || `${pixels}p`;
+  // Some API responses omit dimensions; use the selected quality, never the requested one.
+  const resolutions = {
+    6: 240,
+    16: 360,
+    32: 480,
+    64: 720,
+    74: 720,
+    80: 1080,
+    112: 1080,
+    116: 1080,
+    120: 2160,
+    125: 1080,
+    126: 1080,
+    127: 4320,
+  };
+  const resolution = resolutions[track.id];
+  if (resolution) return names[resolution] || `${resolution}p`;
+  throw new MessageError('无法确定所选视频轨道的分辨率，请重新解析视频。');
+}
+
+function playurlParams(labels) {
+  // Ask for the full quality ladder, then apply the user's quality/fallback settings.
+  return { bvid: labels.bvid, cid: labels.cid, qn: 127, fnval: dashFlags(), fourk: 1 };
+}
+
 function mediaURLs(track) {
   const urls = [track.baseUrl, track.base_url, ...(track.backupUrl || []), ...(track.backup_url || [])];
   const candidates = [];
@@ -228,11 +285,62 @@ function cdnState(labels) {
 async function mediaTracks(labels) {
   const cookie = gopeed.settings.cookie?.trim() || undefined;
   const api = createVideo();
-  const result = await api.playurl({ bvid: labels.bvid, cid: labels.cid, fnval: dashFlags(), fourk: 1 });
-  const video = selectTrack(result.dash?.video, labels.quality ?? gopeed.settings.quality);
+  const params = playurlParams(labels);
+  const started = Date.now();
+  const requestId = `${labels.bvid}/${labels.cid}/${started}`;
+  gopeed.logger.debug(
+    'Bilibili playurl request',
+    JSON.stringify({
+      requestId,
+      ...params,
+      requestedQuality: labels.selectedQuality ?? labels.quality,
+      hasCookie: !!cookie,
+      userAgent: api.request.defaults.headers['User-Agent'],
+    })
+  );
+  const result = await api.playurl(params);
+  // Record the response structure, never Cookie, voucher tokens or signed media URLs.
+  gopeed.logger.debug(
+    'Bilibili playurl response',
+    JSON.stringify({
+      requestId,
+      elapsedMs: Date.now() - started,
+      keys: Object.keys(result || {}),
+      format: result?.format,
+      quality: result?.quality,
+      acceptQuality: result?.accept_quality,
+      hasVoucher: !!result?.v_voucher,
+      dashKeys: Object.keys(result?.dash || {}),
+      videoQualities: result?.dash?.video?.map((track) => track.id),
+      audioQualities: result?.dash?.audio?.map((track) => track.id),
+      dolbyAudioCount: result?.dash?.dolby?.audio?.length || 0,
+      hasFlacAudio: !!result?.dash?.flac?.audio,
+      durlCount: result?.durl?.length || 0,
+      viewInfoKeys: Object.keys(result?.view_info || {}),
+    })
+  );
+  if (result.v_voucher) {
+    throw new MessageError('B站要求风控验证，未返回视频地址。请在浏览器打开该视频完成验证后重试，或更新扩展 Cookie。');
+  }
+  const quality = labels.selectedQuality ?? labels.quality ?? gopeed.settings.quality;
+  const video = selectTrack(result.dash?.video, quality);
   const audio = selectTrack(result.dash?.audio);
   if (!video || !audio) throw new MessageError('该视频未提供可合并的 DASH 音视频轨道，请检查登录状态和画质设置。');
-  return { video: mediaURLs(video), audio: mediaURLs(audio), cookie };
+  const resolution = trackResolution(video);
+  // A refreshed URL must still match the filename shown when the task was created.
+  if (labels.selectedQuality != null && (video.id != labels.selectedQuality || resolution !== labels.resolution)) {
+    throw new MessageError('任务创建时的画质已不可用，请检查 Cookie 或重新创建任务以选择当前可用画质。');
+  }
+  gopeed.logger.debug(
+    'DASH quality',
+    JSON.stringify({
+      requested: quality,
+      available: [...new Set(result.dash.video.map((track) => track.id))],
+      selected: video.id,
+      resolution,
+    })
+  );
+  return { video: mediaURLs(video), audio: mediaURLs(audio), cookie, quality: video.id, resolution };
 }
 
 function nextPair(tracks, state) {
@@ -250,10 +358,10 @@ function nextPair(tracks, state) {
 async function createMergedURL(labels, selected, preparedTracks) {
   requireMergeRuntime();
   // Capture serializable task identity; never retain an event/task wrapper in the opener.
-  const { bvid, cid, quality } = labels;
+  const { bvid, cid, quality, selectedQuality, resolution } = labels;
   return await gopeed.runtime.blob.createObjectURL(
     async () => {
-      const tracks = preparedTracks || (await mediaTracks({ bvid, cid, quality }));
+      const tracks = preparedTracks || (await mediaTracks({ bvid, cid, quality, selectedQuality, resolution }));
       const cookie = tracks.cookie;
       const pair = selected || nextPair(tracks, { failed: [] });
       const video = tracks.video.find((entry) => entry.origin === pair.video);
@@ -281,7 +389,7 @@ async function refreshMergedURL(task) {
   const next = await createMergedURL(req.labels, state.current, tracks);
   try {
     await req.putLabel('mergeCdnState', JSON.stringify(state));
-    await task.setUrl(next);
+    await req.setUrl(next);
   } catch (error) {
     await gopeed.runtime.blob.revokeObjectURL(next);
     throw error;
@@ -303,10 +411,7 @@ async function updateDownloadUrl(task) {
   if (!req.labels.gotDlink || task.status === 'error') {
     const lables = task.meta.req.labels;
     const video = createVideo();
-    const fnval = dashFlags();
-
-    const videoUrl = await video.playurl({ bvid: lables.bvid, cid: lables.cid, fnval, fourk: 1 });
-    gopeed.logger.debug('video list', JSON.stringify(videoUrl.dash.video));
+    const videoUrl = await video.playurl(playurlParams(lables));
     const fallbackBest = gopeed.settings.qualityFallback === 'best';
     // 优先匹配指定清晰度，如果没有则按照清晰度排序规则选择第一个
     let downloadUrl;
