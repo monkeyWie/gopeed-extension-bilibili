@@ -165,3 +165,42 @@ test('API errors are sanitized and do not leak response or credentials', async (
     );
   }
 });
+
+test('mall uses its optional Cookie without changing classroom authentication', async () => {
+  const sent = [];
+  const config = { cookie: ' SESSDATA=classroom-fixture ', mallCookie: ' SESSDATA=mall-fixture ' };
+  const fetcher = async (url, options) => {
+    sent.push(options.headers.Cookie);
+    return reply(url.includes('h5/detail') ? mallData() : cheeseData())();
+  };
+  await courseCatalog(mall, config, fetcher);
+  await courseCatalog({ source: 'cheese', episode: '1' }, config, fetcher);
+  assert.deepEqual(sent, ['SESSDATA=mall-fixture', 'SESSDATA=classroom-fixture']);
+  await assert.rejects(courseCatalog(mall, {}, fetcher), /会员购未配置 Cookie/);
+  assert.equal(sent.length, 2);
+  await assert.rejects(
+    courseCatalog(mall, settings, async () => ({ ok: true, json: async () => ({ code: 11119999 }) })),
+    /code=11119999，已设置 Cookie 请求头/
+  );
+});
+
+test('mall sends the actual lesson page context and safely classifies server rejections', async () => {
+  await assert.rejects(
+    courseCatalog(mall, settings, async (url, options) => {
+      assert.equal(options.headers.Origin, 'https://mall.bilibili.com');
+      assert.equal(
+        options.headers.Referer,
+        'https://mall.bilibili.com/lesson/play?courseId=1000625147&lessonId=180281190609920&itemId=10302975'
+      );
+      assert.match(options.headers['User-Agent'], /Chrome\//);
+      return {
+        ok: true,
+        json: async () => ({ code: 81100009, message: 'csrf校验失败 SESSDATA=fixture-only https://private.example' }),
+      };
+    }),
+    (error) =>
+      /code=81100009/.test(error.message) &&
+      /CSRF 校验/.test(error.message) &&
+      !/fixture-only|private.example/.test(error.message)
+  );
+});

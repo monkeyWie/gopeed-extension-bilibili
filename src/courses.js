@@ -3,6 +3,27 @@
 const mallBase = 'https://mall.bilibili.com/mall-search-items/items/course/';
 const cheeseBase = 'https://api.bilibili.com/pugv/';
 
+function serverHint(result) {
+  const message =
+    typeof result?.message === 'string' ? result.message : typeof result?.msg === 'string' ? result.msg : '';
+  // Classify known wording rather than echoing an arbitrary server response, which
+  // could include account identifiers, URLs or authentication material.
+  const hints = [
+    [/csrf/i, 'CSRF 校验'],
+    [/未登[录陆]|没有登[录陆]|登录失效|登录过期/, '登录状态无效'],
+    [/cookie/i, 'Cookie 校验'],
+    [/参数/, '请求参数'],
+    [/签名/, '请求签名'],
+    [/权限|购买/, '购买或观看权限'],
+    [/频繁|风控|验证码/, '网站验证'],
+    [/非法|来源|referer|origin/i, '请求来源或合法性校验'],
+    [/系统异常/, '服务器系统异常'],
+  ]
+    .filter(([pattern]) => pattern.test(message))
+    .map(([, hint]) => hint);
+  return hints.length ? `；服务器提示类型：${hints.join('、')}` : '';
+}
+
 function id(value) {
   if (typeof value === 'number' && !Number.isSafeInteger(value)) throw new Error('课程 ID 超出安全整数范围。');
   const text = String(value ?? '');
@@ -26,14 +47,28 @@ export function courseTarget(url) {
 }
 
 async function request(url, settings, fetcher, body) {
+  const isMall = url.startsWith(mallBase);
+  const cookie = (isMall ? settings.mallCookie?.trim() || settings.cookie?.trim() : settings.cookie?.trim()) || '';
+  const site = isMall ? '会员购' : '课堂';
+  if (!cookie)
+    throw new Error(`${site}未配置 Cookie，请在扩展设置中填写购买账号的${isMall ? '会员购 Cookie' : '网站 Cookie'}。`);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 20000);
+  let failure = `${site}接口请求失败，请检查网络或更新${isMall ? '会员购 Cookie' : '网站 Cookie'}。`;
   try {
     const headers = {
       Referer: url.startsWith(mallBase) ? 'https://mall.bilibili.com/' : 'https://www.bilibili.com/',
-      'User-Agent': 'Mozilla/5.0',
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+      Accept: 'application/json, text/plain, */*',
     };
-    if (settings.cookie?.trim()) headers.Cookie = settings.cookie.trim();
+    if (isMall) {
+      headers.Origin = 'https://mall.bilibili.com';
+      headers.Referer = `https://mall.bilibili.com/lesson/play?courseId=${id(body.courseId)}&lessonId=${id(
+        body.lessonId
+      )}&itemId=${id(body.itemId)}`;
+    }
+    headers.Cookie = cookie;
     if (body) headers['Content-Type'] = 'application/json';
     const response = await fetcher(url, {
       method: body ? 'POST' : 'GET',
@@ -42,12 +77,21 @@ async function request(url, settings, fetcher, body) {
       redirect: 'error',
       signal: controller.signal,
     });
-    if (!response.ok) throw new Error();
+    if (!response.ok) {
+      failure = `${site}接口 HTTP ${Number(response.status) || '错误'}；Cookie 已附带，请检查登录状态或网络。`;
+      throw new Error();
+    }
     const result = await response.json();
-    if (result?.code !== 0 || !result.data || typeof result.data !== 'object') throw new Error();
+    if (result?.code !== 0 || !result.data || typeof result.data !== 'object') {
+      const code = Number.isSafeInteger(result?.code) ? result.code : '未知';
+      failure = `${site}接口拒绝或返回无效数据（code=${code}，已设置 Cookie 请求头）${serverHint(result)}；请在${
+        isMall ? '会员购课程页面' : '课堂页面'
+      }确认登录和购买权限后更新 Cookie。`;
+      throw new Error();
+    }
     return result.data;
   } catch (_) {
-    throw new Error('课程接口请求失败，请检查网络、购买权限和扩展 Cookie。');
+    throw new Error(failure);
   } finally {
     clearTimeout(timer);
   }
