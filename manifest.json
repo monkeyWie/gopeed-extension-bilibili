@@ -2,9 +2,9 @@
   "name": "bilibili",
   "author": "monkeyWie",
   "title": "哔哩哔哩",
-  "description": "哔哩哔哩视频下载扩展，支持批量下载分P视频和自动合并音视频",
+  "description": "哔哩哔哩视频下载扩展，支持分P、已购课堂及会员购课程和音视频合并",
   "icon": "icon.png",
-  "version": "2.1.0",
+  "version": "2.2.2",
   "homepage": "https://github.com/monkeyWie/gopeed-extension-bilibili",
   "repository": {
     "url": "https://github.com/monkeyWie/gopeed-extension-bilibili"
@@ -15,7 +15,10 @@
       "match": {
         "urls": [
           "*://*.bilibili.com/video/*",
-          "*://b23.tv/*"
+          "*://b23.tv/*",
+          "https://www.bilibili.com/cheese/play/*",
+          "https://bilibili.com/cheese/play/*",
+          "https://mall.bilibili.com/lesson/play*"
         ]
       },
       "entry": "dist/index.js"
@@ -23,18 +26,14 @@
     {
       "event": "onStart",
       "match": {
-        "labels": [
-          "monkeyWie@bilibili"
-        ]
+        "labels": ["monkeyWie@bilibili"]
       },
       "entry": "dist/index.js"
     },
     {
       "event": "onError",
       "match": {
-        "labels": [
-          "monkeyWie@bilibili"
-        ]
+        "labels": ["monkeyWie@bilibili"]
       },
       "entry": "dist/index.js"
     }
@@ -118,6 +117,13 @@
       "title": "网站 Cookie",
       "description": "Cookie 可以通过浏览器开发者工具获取",
       "type": "string"
+    },
+    {
+      "name": "mallCookie",
+      "title": "会员购 Cookie（可选）",
+      "description": "会员购登录失败时，填写在 mall.bilibili.com 课程页面获取的完整请求 Cookie。留空使用网站 Cookie。",
+      "type": "string",
+      "value": ""
     }
   ]
 }

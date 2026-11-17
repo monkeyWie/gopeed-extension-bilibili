@@ -4,9 +4,10 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { test } from 'node:test';
 import { enc } from '../src/av2bv.js';
+import { courseTarget, courseCatalog, coursePlayback } from '../src/courses.js';
 import { Video as SDKVideo } from '@renmu/bili-api';
 
-const script = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8').replace(/^import .*;\n/gm, '');
+const script = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8').replace(/^import .*;\r?\n/gm, '');
 const bvid = 'BV1BJ4m1e7g8';
 class MessageError extends Error {}
 
@@ -113,6 +114,9 @@ function setup(options = {}) {
   vm.runInNewContext(script, {
     Video: options.realSDK ? RealVideo : Video,
     enc,
+    courseTarget,
+    courseCatalog,
+    coursePlayback,
     gopeed,
     URL,
     TextEncoder,
@@ -573,4 +577,131 @@ test('invalid short links report MessageError instead of falling back to downloa
     assert.ok(requests <= 5);
     assert.equal(h.calls.length, 0);
   }
+});
+
+function courseFetch({ mall = false, denied = false } = {}) {
+  const calls = [];
+  const fetcher = async (address, options) => {
+    calls.push({ address, options });
+    let data;
+    if (address.includes('h5/detail')) {
+      data = {
+        courseId: 11,
+        lessonId: 22,
+        itemsName: '会员购',
+        hasBought: !denied,
+        sectionCount: 2,
+        chapterList: [
+          {
+            sectionList: [1, 2].map((n) => ({
+              lessonId: 22,
+              sectionId: n + 100,
+              sectionName: `课时${n}`,
+              hasWatchRight: !denied,
+              videoTime: 100000,
+            })),
+          },
+        ],
+      };
+    } else if (address.includes('section/play/detail')) {
+      const body = JSON.parse(options.body);
+      data = {
+        lessonId: 22,
+        sectionId: body.sectionId,
+        hasWatchRight: !denied,
+        videoTime: 100,
+        videoUrl: `http://upos-test.bilivideo.com/mallxcodeboss/${body.sectionId}.mp4?refresh=${calls.length}`,
+      };
+    } else if (address.includes('view/web/season')) {
+      data = {
+        season_id: 42,
+        title: '课堂',
+        ep_count: 2,
+        user_status: { payed: denied ? 0 : 1 },
+        episodes: [1, 2].map((n) => ({ id: n, cid: n + 100, aid: n + 200, title: `课堂${n}`, playable: true })),
+      };
+    } else {
+      data = {
+        has_paid: !denied,
+        is_preview: 0,
+        timelength: 100000,
+        dash: {
+          video: [{ id: 80, width: 1920, height: 1080, base_url: 'https://upos-test.bilivideo.com/video.m4s' }],
+          audio: [{ id: 30280, base_url: 'https://upos-test.bilivideo.com/audio.m4s' }],
+        },
+      };
+    }
+    return { ok: true, json: async () => ({ code: 0, data }) };
+  };
+  return {
+    calls,
+    fetcher,
+    url: mall
+      ? 'https://mall.bilibili.com/lesson/play?courseId=11&lessonId=22&itemId=33'
+      : 'https://www.bilibili.com/cheese/play/ep1',
+  };
+}
+
+test('classroom lists full lessons and preserves course identity through Blob/start/CDN retry', async () => {
+  const fixture = courseFetch();
+  const h = setup({ fetch: fixture.fetcher });
+  const ctx = { req: { url: fixture.url } };
+  await h.handlers.onResolve(ctx);
+  assert.equal(ctx.res.name, '课堂');
+  assert.equal(ctx.res.files.length, 2);
+  const file = ctx.res.files[1];
+  assert.equal(file.req.labels.episode, '2');
+  assert.equal(file.req.labels.source, 'cheese');
+  assert.equal(h.calls.filter((c) => c.kind === 'playurl').length, 0);
+  await h.blobs.get(file.req.url).open();
+  assert.equal(h.merges[0].video.headers.Cookie, undefined);
+  assert.equal(h.merges[0].video.headers.Referer, 'https://www.bilibili.com/cheese/play/ep2');
+  const task = h.task(file);
+  const oldURL = file.req.url;
+  await h.handlers.onStart({ task });
+  assert.notEqual(file.req.url, oldURL);
+  assert.ok(h.revoked.includes(oldURL));
+  assert.ok(fixture.calls.at(-1).address.includes('ep_id=2'));
+  await assert.rejects(h.handlers.onError({ task }), /CDN/);
+  assert.equal(JSON.stringify(file.req.labels).includes('session=secret'), false);
+});
+
+test('mall selects a lesson range, uses direct HTTPS MP4, refreshes and bounds retries without FFmpeg', async () => {
+  const fixture = courseFetch({ mall: true });
+  const h = setup({ fetch: fixture.fetcher, noRuntime: true });
+  const ctx = { req: { url: fixture.url + '&p=2' } };
+  await h.handlers.onResolve(ctx);
+  assert.equal(ctx.res.range, true);
+  assert.equal(ctx.res.files.length, 1);
+  const file = ctx.res.files[0];
+  assert.equal(file.req.labels.sectionId, '102');
+  assert.equal(file.req.labels.type, 'course-mp4');
+  assert.match(file.name, /lesson102\..*original\.mp4$/);
+  assert.match(file.req.url, /^https:\/\/upos-test\.bilivideo.com/);
+  assert.equal(file.req.extra.header.Referer, 'https://mall.bilibili.com/');
+  assert.equal(file.req.extra.header.Cookie, undefined);
+  const task = h.task(file),
+    previous = file.req.url;
+  await h.handlers.onStart({ task });
+  assert.notEqual(file.req.url, previous);
+  for (let i = 0; i < 5; i++) await h.handlers.onError({ task });
+  assert.equal(task.continued, 3);
+  assert.equal(h.blobs.size, 0);
+  assert.equal(h.merges.length, 0);
+  assert.equal(JSON.stringify(file.req.labels).includes('refresh='), false);
+});
+
+test('course permission failures and invalid ranges do not create download files', async () => {
+  for (const mall of [false, true]) {
+    const fixture = courseFetch({ mall, denied: true });
+    const h = setup({ fetch: fixture.fetcher });
+    const ctx = { req: { url: fixture.url } };
+    await assert.rejects(h.handlers.onResolve(ctx), /权限/);
+    assert.equal(ctx.res, undefined);
+    assert.equal(h.blobs.size, 0);
+  }
+  const fixture = courseFetch();
+  const h = setup({ fetch: fixture.fetcher });
+  for (const p of ['0', '3', '2-1', '1-100000000', 'bad'])
+    await assert.rejects(h.handlers.onResolve({ req: { url: fixture.url + '?p=' + p } }), /范围/);
 });

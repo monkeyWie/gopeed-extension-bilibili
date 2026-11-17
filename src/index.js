@@ -1,6 +1,7 @@
 /* eslint-env es6 */
 import { Video } from '@renmu/bili-api';
 import { enc } from './av2bv.js';
+import { courseTarget, courseCatalog, coursePlayback } from './courses.js';
 
 function createVideo() {
   // Keep the SDK's browser UA: anonymous playurl requests without it can require verification.
@@ -36,8 +37,7 @@ async function resolveVideoURL(rawURL) {
       if (url.hostname === 'b23.tv') continue;
       if (
         (url.hostname === 'bilibili.com' || url.hostname.endsWith('.bilibili.com')) &&
-        url.pathname.startsWith('/video/') &&
-        (getBvid(url.pathname) || getAid(url.pathname))
+        ((url.pathname.startsWith('/video/') && (getBvid(url.pathname) || getAid(url.pathname))) || courseTarget(url))
       )
         return url;
       throw new MessageError('该B站短链不是普通视频链接，目前仅支持视频和分P视频。');
@@ -56,6 +56,15 @@ async function resolveVideoURL(rawURL) {
 gopeed.events.onResolve(async (ctx) => {
   requireHostVersion();
   const url = await resolveVideoURL(ctx.req.url);
+  const course = courseTarget(url);
+  if (course) {
+    try {
+      await resolveCourse(ctx, url, course);
+    } catch (error) {
+      throw new MessageError(error.message);
+    }
+    return;
+  }
   const videoId = {};
   const bvid = getBvid(url.pathname);
   if (bvid) {
@@ -137,7 +146,9 @@ gopeed.events.onResolve(async (ctx) => {
 
 /** @param { import('gopeed').OnStartContext } ctx */
 gopeed.events.onStart(async (ctx) => {
-  if (ctx.task.meta.req.labels.type === 'merged') {
+  if (ctx.task.meta.req.labels.type === 'course-mp4') {
+    await refreshCourseMP4(ctx.task);
+  } else if (ctx.task.meta.req.labels.type === 'merged') {
     await refreshMergedURL(ctx.task);
   } else {
     await updateDownloadUrl(ctx.task);
@@ -146,7 +157,13 @@ gopeed.events.onStart(async (ctx) => {
 
 /** @param { import('gopeed').OnErrorContext } ctx */
 gopeed.events.onError(async (ctx) => {
-  if (ctx.task.meta.req.labels.type === 'merged') {
+  if (ctx.task.meta.req.labels.type === 'course-mp4') {
+    const req = ctx.task.meta.req;
+    const retries = Number(req.labels.courseRetries || 0);
+    if (retries >= 3) return;
+    await req.putLabel('courseRetries', String(retries + 1));
+    await refreshCourseMP4(ctx.task);
+  } else if (ctx.task.meta.req.labels.type === 'merged') {
     const req = ctx.task.meta.req;
     const state = cdnState(req.labels);
     if (state.current && !state.failed.some((pair) => samePair(pair, state.current))) {
@@ -298,7 +315,8 @@ async function mediaTracks(labels) {
       userAgent: api.request.defaults.headers['User-Agent'],
     })
   );
-  const result = await api.playurl(params);
+  const result =
+    labels.source === 'cheese' ? await coursePlayback(labels, gopeed.settings, fetch) : await api.playurl(params);
   // Record the response structure, never Cookie, voucher tokens or signed media URLs.
   gopeed.logger.debug(
     'Bilibili playurl response',
@@ -340,7 +358,13 @@ async function mediaTracks(labels) {
       resolution,
     })
   );
-  return { video: mediaURLs(video), audio: mediaURLs(audio), cookie, quality: video.id, resolution };
+  return {
+    video: mediaURLs(video),
+    audio: mediaURLs(audio),
+    cookie: labels.source ? undefined : cookie,
+    quality: video.id,
+    resolution,
+  };
 }
 
 function nextPair(tracks, state) {
@@ -358,17 +382,20 @@ function nextPair(tracks, state) {
 async function createMergedURL(labels, selected, preparedTracks) {
   requireMergeRuntime();
   // Capture serializable task identity; never retain an event/task wrapper in the opener.
-  const { bvid, cid, quality, selectedQuality, resolution } = labels;
+  const identity = { ...labels };
   return await gopeed.runtime.blob.createObjectURL(
     async () => {
-      const tracks = preparedTracks || (await mediaTracks({ bvid, cid, quality, selectedQuality, resolution }));
+      const tracks = preparedTracks || (await mediaTracks(identity));
       const cookie = tracks.cookie;
       const pair = selected || nextPair(tracks, { failed: [] });
       const video = tracks.video.find((entry) => entry.origin === pair.video);
       const audio = tracks.audio.find((entry) => entry.origin === pair.audio);
       if (!video || !audio) throw new MessageError('所选 CDN 已不在最新媒体地址列表中，请切换 CDN 重试。');
       const headers = {
-        Referer: `https://www.bilibili.com/video/${bvid}`,
+        Referer:
+          identity.source === 'cheese'
+            ? `https://www.bilibili.com/cheese/play/ep${identity.episode}`
+            : `https://www.bilibili.com/video/${identity.bvid}`,
       };
       if (cookie) headers.Cookie = cookie;
       return gopeed.runtime.ffmpeg.merge({
@@ -401,6 +428,74 @@ async function refreshMergedURL(task) {
       // Registrations from a previous Gopeed process no longer exist.
     }
   }
+}
+
+async function resolveCourse(ctx, url, target) {
+  const catalog = await courseCatalog(target, gopeed.settings, fetch);
+  const selection = url.searchParams.get('p');
+  let entries = catalog.entries;
+  if (selection) {
+    if (!/^\d+(?:-\d+)?$/.test(selection)) throw new MessageError('课时范围应为 p=2 或 p=2-5。');
+    const [first, last = first] = selection.split('-').map(Number);
+    if (first < 1 || last < first || last > entries.length) throw new MessageError('课时范围超出课程目录。');
+    entries = entries.slice(first - 1, last);
+  }
+  const permitted = entries.filter((entry) => entry.allowed);
+  if (!permitted.length) throw new MessageError('未取得所选课程的完整观看权限，请在扩展设置中更新购买账号的 Cookie。');
+  if (selection && permitted.length !== entries.length)
+    throw new MessageError('所选课时包含无权观看的内容，请调整 p 范围或检查购买账号。');
+  if (permitted.length !== entries.length)
+    gopeed.logger.warn?.(`跳过 ${entries.length - permitted.length} 个无完整观看权限的课时。`);
+  if (target.source === 'cheese') requireMergeRuntime();
+  const files = [];
+  try {
+    for (const entry of permitted) {
+      const { title, order, ...identity } = entry;
+      delete identity.allowed;
+      const labels = {
+        ...identity,
+        [gopeed.info.identity]: '1',
+        quality: gopeed.settings.quality,
+        type: target.source === 'mall' ? 'course-mp4' : 'merged',
+      };
+      let address, resolution;
+      if (labels.type === 'course-mp4') {
+        address = (await coursePlayback(labels, gopeed.settings, fetch)).direct;
+        // The mall API does not report resolution; do not invent a quality label.
+        resolution = 'original';
+      } else {
+        const tracks = await mediaTracks(labels);
+        labels.selectedQuality = tracks.quality;
+        labels.resolution = resolution = tracks.resolution;
+        address = await createMergedURL(labels);
+      }
+      files.push({
+        name: videoFilename(
+          `lesson${entry.episode || entry.sectionId}`,
+          `${String(order).padStart(3, '0')} ${title}`,
+          resolution
+        ),
+        req: {
+          url: address,
+          rawUrl: ctx.req.url,
+          labels,
+          ...(labels.type === 'course-mp4'
+            ? { extra: { header: { Referer: 'https://mall.bilibili.com/', 'User-Agent': 'Mozilla/5.0' } } }
+            : {}),
+        },
+      });
+    }
+  } catch (error) {
+    for (const file of files)
+      if (file.req.labels.type === 'merged') await gopeed.runtime.blob.revokeObjectURL(file.req.url);
+    throw error;
+  }
+  ctx.res = { name: catalog.title, range: target.source === 'mall', files };
+}
+
+async function refreshCourseMP4(task) {
+  const result = await coursePlayback(task.meta.req.labels, gopeed.settings, fetch);
+  await task.meta.req.setUrl(result.direct);
 }
 
 // Compatibility with existing separate video/audio tasks.
